@@ -12,6 +12,20 @@ logger = logging.getLogger(__name__)
 ANTHROPIC_API_URL = "https://api.anthropic.com"
 client = httpx.AsyncClient()
 
+async def ensure_client_healthy():
+    global client
+    try:
+        if client.is_closed:
+            logger.info("Client is closed, reinitializing...")
+            client = httpx.AsyncClient()
+    except Exception as e:
+        logger.warning(f"Client health check failed, reinitializing: {e}")
+        try:
+            await client.aclose()
+        except:
+            pass
+        client = httpx.AsyncClient()
+
 @asynccontextmanager
 async def lifespan(_):
     yield
@@ -23,6 +37,8 @@ app = FastAPI(title="VibeBooster Anthropic Proxy", version="1.0.0", lifespan=lif
 @app.post("/v1/messages")
 async def proxy_messages(request: Request):
     try:
+        await ensure_client_healthy()
+        
         request_body = await request.json()
         
         logger.info(f"Incoming request: {request.method} {request.url}")
@@ -89,6 +105,8 @@ async def proxy_messages(request: Request):
 
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"])
 async def proxy_other_requests(request: Request, path: str):
+    await ensure_client_healthy()
+    
     headers = {**dict(request.headers)}
     headers.pop("host", None)
     
