@@ -70,17 +70,21 @@ async def proxy_messages(request: Request):
             
             content = message.get('content', [])
             if isinstance(content, str):
-                logger.info(f"  Content: type=text, text={content[:40].replace(chr(10), '\\n')}")
+                text_preview = content[:40].replace('\n', '\\n')
+                logger.info(f"  Content: type=text, text={text_preview}")
             elif isinstance(content, list):
                 for j, content_item in enumerate(content):
                     if isinstance(content_item, dict):
                         content_type = content_item.get('type', 'unknown')
                         text = content_item.get('text', '')
-                        logger.info(f"  Content {j}: type={content_type}, text={text[:40].replace(chr(10), '\\n')}")
+                        text_preview = text[:40].replace('\n', '\\n')
+                        logger.info(f"  Content {j}: type={content_type}, text={text_preview}")
                     else:
-                        logger.info(f"  Content {j}: {str(content_item)[:40].replace(chr(10), '\\n')}")
+                        text_preview = str(content_item)[:40].replace('\n', '\\n')
+                        logger.info(f"  Content {j}: {text_preview}")
             else:
-                logger.info(f"  Content: {str(content)[:40].replace(chr(10), '\\n')}")
+                text_preview = str(content)[:40].replace('\n', '\\n')
+                logger.info(f"  Content: {text_preview}")
         
         # Compress the payload before forwarding
         compressed_body = await compress_payload(request_body, test_mode=True)
@@ -90,27 +94,30 @@ async def proxy_messages(request: Request):
         headers.pop("host", None)
         
         if compressed_body.get("stream", False):
-            async with client.stream(
-                "POST",
-                f"{ANTHROPIC_API_URL}/v1/messages",
-                json=compressed_body,
-                headers=headers,
-                timeout=60.0
-            ) as stream_response:
-                
-                logger.info(f"Anthropic response status: {stream_response.status_code}")
-                logger.info(f"Anthropic response headers: {dict(stream_response.headers)}")
-                
-                if stream_response.status_code >= 400:
-                    response_text = await stream_response.aread()
-                    error_data = response_text.decode()
-                    raise HTTPException(status_code=stream_response.status_code, detail=error_data)
-                
-                return StreamingResponse(
-                    stream_response.aiter_bytes(),
-                    status_code=stream_response.status_code,
-                    headers=dict(stream_response.headers)
-                )
+            async def stream_generator():
+                async with client.stream(
+                    "POST",
+                    f"{ANTHROPIC_API_URL}/v1/messages",
+                    json=compressed_body,
+                    headers=headers,
+                    timeout=60.0
+                ) as stream_response:
+                    
+                    logger.info(f"Anthropic response status: {stream_response.status_code}")
+                    logger.info(f"Anthropic response headers: {dict(stream_response.headers)}")
+                    
+                    if stream_response.status_code >= 400:
+                        response_text = await stream_response.aread()
+                        error_data = response_text.decode()
+                        raise HTTPException(status_code=stream_response.status_code, detail=error_data)
+                    
+                    async for chunk in stream_response.aiter_bytes():
+                        yield chunk
+            
+            return StreamingResponse(
+                stream_generator(),
+                media_type="text/event-stream"
+            )
         else:
             response = await client.post(
                 f"{ANTHROPIC_API_URL}/v1/messages",
@@ -125,7 +132,8 @@ async def proxy_messages(request: Request):
             for i, content_item in enumerate(response_data.get('content', [])):
                 content_type = content_item.get('type', 'unknown')
                 text = content_item.get('text', '')
-                logger.info(f"  Response content {i}: type={content_type}, text={text[:40].replace(chr(10), '\\n')}")
+                text_preview = text[:40].replace('\n', '\\n')
+                logger.info(f"  Response content {i}: type={content_type}, text={text_preview}")
             
             if response.status_code >= 400:
                 try:
