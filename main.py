@@ -66,25 +66,45 @@ async def proxy_messages(request: Request):
 
         for i, message in enumerate(request_body.get('messages', [])):
             role = message.get('role', 'unknown')
-            logger.info(f"Message {i}: role={role}")
+            logger.info(f"─── Message {i}: role={role} ───")
             
             content = message.get('content', [])
             if isinstance(content, str):
                 text_preview = content[:40].replace('\n', '\\n')
-                logger.info(f"  Content: type=text, text={text_preview}")
+                logger.info(f"  📝 TEXT: {text_preview}")
             elif isinstance(content, list):
                 for j, content_item in enumerate(content):
                     if isinstance(content_item, dict):
                         content_type = content_item.get('type', 'unknown')
-                        text = content_item.get('text', '')
-                        text_preview = text[:40].replace('\n', '\\n')
-                        logger.info(f"  Content {j}: type={content_type}, text={text_preview}")
+                        
+                        if content_type == 'text':
+                            text = content_item.get('text', '')
+                            text_preview = text[:40].replace('\n', '\\n')
+                            logger.info(f"  📝 TEXT[{j}]: {text_preview}")
+                        elif content_type == 'tool_use':
+                            tool_name = content_item.get('name', 'unknown')
+                            tool_id = content_item.get('id', 'unknown')
+                            tool_input = content_item.get('input', {})
+                            input_preview = str(tool_input)[:80].replace('\n', '\\n')
+                            logger.info(f"  🔧 TOOL_USE[{j}]: {tool_name}")
+                            logger.info(f"    └─ id: {tool_id}")
+                            logger.info(f"    └─ input: {input_preview}")
+                        elif content_type == 'tool_result':
+                            tool_use_id = content_item.get('tool_use_id', 'unknown')
+                            result_content = content_item.get('content', '')
+                            content_preview = str(result_content)[:80].replace('\n', '\\n')
+                            logger.info(f"  📋 TOOL_RESULT[{j}]: {tool_use_id}")
+                            logger.info(f"    └─ content: {content_preview}")
+                        else:
+                            text = content_item.get('text', '')
+                            text_preview = text[:40].replace('\n', '\\n')
+                            logger.info(f"  ❓ {content_type.upper()}[{j}]: {text_preview}")
                     else:
                         text_preview = str(content_item)[:40].replace('\n', '\\n')
-                        logger.info(f"  Content {j}: {text_preview}")
+                        logger.info(f"  ❓ UNKNOWN[{j}]: {text_preview}")
             else:
                 text_preview = str(content)[:40].replace('\n', '\\n')
-                logger.info(f"  Content: {text_preview}")
+                logger.info(f"  ❓ UNKNOWN: {text_preview}")
         
         # Compress the payload before forwarding
         compressed_body = await compress_payload(request_body, test_mode=True)
@@ -101,11 +121,7 @@ async def proxy_messages(request: Request):
                     json=compressed_body,
                     headers=headers,
                     timeout=60.0
-                ) as stream_response:
-                    
-                    logger.info(f"Anthropic response status: {stream_response.status_code}")
-                    logger.info(f"Anthropic response headers: {dict(stream_response.headers)}")
-                    
+                ) as stream_response:                    
                     if stream_response.status_code >= 400:
                         response_text = await stream_response.aread()
                         error_data = response_text.decode()
@@ -127,13 +143,13 @@ async def proxy_messages(request: Request):
             )
             
             response_data = response.json()
-            logger.info(f"Response: type={response_data.get('type')}, role={response_data.get('role')}, model={response_data.get('model')}")
+            logger.info(f"─── Response: type={response_data.get('type')}, role={response_data.get('role')}, model={response_data.get('model')} ───")
             
             for i, content_item in enumerate(response_data.get('content', [])):
                 content_type = content_item.get('type', 'unknown')
                 text = content_item.get('text', '')
                 text_preview = text[:40].replace('\n', '\\n')
-                logger.info(f"  Response content {i}: type={content_type}, text={text_preview}")
+                logger.info(f"  📝 TEXT[{i}]: {text_preview}")
             
             if response.status_code >= 400:
                 try:
@@ -141,9 +157,6 @@ async def proxy_messages(request: Request):
                     raise HTTPException(status_code=response.status_code, detail=error_data)
                 except ValueError:
                     raise HTTPException(status_code=response.status_code, detail=response.text)
-            
-            response_data = response.json()
-            logger.info(f"Anthropic response body: {response_data}")
             
             return JSONResponse(content=response_data)
                 
@@ -205,4 +218,4 @@ async def compress_payload(payload, test_mode=False):
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    uvicorn.run(app, host="127.0.0.1", port=8000, reload=True)
