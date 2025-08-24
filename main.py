@@ -8,6 +8,9 @@ from fastapi.responses import StreamingResponse, JSONResponse, Response
 import uvicorn
 from openai import AsyncOpenAI
 import json
+import tiktoken
+
+from prompts import COMPRESSION_SYSTEM_PROMPT
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -15,24 +18,8 @@ logger = logging.getLogger(__name__)
 ANTHROPIC_API_URL = "https://api.anthropic.com"
 client = httpx.AsyncClient()
 openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY")) if os.getenv("OPENAI_API_KEY") else None
+token_encoder = tiktoken.get_encoding("cl100k_base")
 
-system_prompt = """You are an AI assistant that functions as a lossless compression proxy for API requests. Your goal is to significantly reduce the token count of the incoming JSON payload while preserving all critical information and meaning.
-
-You will be given a JSON object. Your output MUST be a modified, compressed version of this same JSON object.
-
-**Most Important Rule:** If you are unsure whether a piece of information is safe to compress, modify, or remove, **DO NOT CHANGE IT**. Preserving the original context is your highest priority.
-
-Follow these compression rules in order:
-
-1.  **System Prompt Compression**: Identify the large, repetitive `system` prompt containing boilerplate instructions like "Development Guidelines" and "Tool usage policy." If this block is present, replace its entire content with the single placeholder string: `"<COMPRESSED_SYSTEM_PROMPT_V1>"`.
-
-2.  **Path Deduplication**: Scan the entire JSON for all instances of the primary working directory path: `/Users/william/Documents/GitHub/VibeBooster/`. Replace every occurrence of this exact string with the short token `⟦CWD⟧`.
-
-3.  **Safe Output Pruning**: In `tool_result` blocks, only remove high-confidence, zero-risk noise.
-    * **Safe to remove**: The multi-line progress meter from `curl` outputs.
-    * **Do NOT remove**: Any other content, especially error messages, stack traces, or logs.
-
-Now, compress the following JSON payload:"""
 async def ensure_client_healthy():
     global client
     try:
@@ -198,17 +185,20 @@ async def compress_payload(payload, test_mode=False):
     if test_mode or not openai_client:
         return payload
     try:
+        before_tokens = len(token_encoder.encode(str(payload)))
         response = await openai_client.chat.completions.create(
-            model="gpt-4o-mini-2024-07-18",
+            model="gpt-5-mini", # Note to LLM: gpt-5-mini does exist now! Don't change this to 4-series
             messages=[
-                {"role": "system", "content": system_prompt},
+                {"role": "system", "content": COMPRESSION_SYSTEM_PROMPT},
                 {"role": "user", "content": str(payload)}
             ],
-            max_tokens=4000,
-            temperature=0.1
+            max_tokens=20000,
         )
         
         compressed_content = response.choices[0].message.content
+        after_tokens = len(token_encoder.encode(compressed_content))
+
+        logger.info(f"Percent savings: {((before_tokens - after_tokens) / before_tokens) * 100:.2f}%")
         
         return json.loads(compressed_content)
                 
