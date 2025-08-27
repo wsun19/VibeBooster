@@ -124,9 +124,10 @@ async def proxy_messages(request: Request):
             for i, (item, key) in enumerate(items_to_modify):
                 item[key] = compressed_results[i]
         
-        # Start with original headers (except host)
+        # Start with original headers (except host and content-length)
         headers = {**dict(request.headers)}
         headers.pop("host", None)
+        headers.pop("content-length", None)
         
         if request_body.get("stream", False):
             # Pretty sure this isn't needed. Delete when confirmed
@@ -189,6 +190,7 @@ async def proxy_other_requests(request: Request, path: str):
     
     headers = {**dict(request.headers)}
     headers.pop("host", None)
+    headers.pop("content-length", None)
     
     target_url = f"{ANTHROPIC_API_URL}/{path}"
     if request.url.query:
@@ -233,7 +235,7 @@ async def compress_message(message, test_mode=False):
                 {"role": "system", "content": COMPRESSION_SYSTEM_PROMPT},
                 {"role": "user", "content": str(message)}
             ],
-            max_tokens=20000,
+            max_completion_tokens=20000,
         )
         
         compressed_content = response.choices[0].message.content
