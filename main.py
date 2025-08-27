@@ -20,6 +20,9 @@ client = httpx.AsyncClient()
 openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY")) if os.getenv("OPENAI_API_KEY") else None
 token_encoder = tiktoken.get_encoding("cl100k_base")
 
+# TODO make this a cache with some eviction policy
+orig_to_compressed = {}
+
 async def ensure_client_healthy():
     global client
     try:
@@ -51,15 +54,13 @@ async def proxy_messages(request: Request):
         
         request_body = await request.json()
 
+        # TODO spin these off on threads. these are independent
         for i, message in enumerate(request_body.get('messages', [])):
             role = message.get('role', 'unknown')
             logger.info(f"─── Message {i}: role={role} ───")
-            
+
             content = message.get('content', [])
-            if isinstance(content, str):
-                text_preview = content[:40].replace('\n', '\\n')
-                logger.info(f"  📝 TEXT: {text_preview}")
-            elif isinstance(content, list):
+            if isinstance(content, list):
                 for j, content_item in enumerate(content):
                     if isinstance(content_item, dict):
                         content_type = content_item.get('type', 'unknown')
@@ -68,6 +69,7 @@ async def proxy_messages(request: Request):
                             text = content_item.get('text', '')
                             text_preview = text[:40].replace('\n', '\\n')
                             logger.info(f"  📝 TEXT[{j}]: {text_preview}")
+                            content_item['text'] = await compress_message(text, test_mode=True)
                         elif content_type == 'tool_use':
                             tool_name = content_item.get('name', 'unknown')
                             tool_id = content_item.get('id', 'unknown')
@@ -82,30 +84,36 @@ async def proxy_messages(request: Request):
                             content_preview = str(result_content)[:80].replace('\n', '\\n')
                             logger.info(f"  📋 TOOL_RESULT[{j}]: {tool_use_id}")
                             logger.info(f"    └─ content: {content_preview}")
+                            content_item['content'] = await compress_message(result_content, test_mode=True)
                         else:
-                            text = content_item.get('text', '')
-                            text_preview = text[:40].replace('\n', '\\n')
-                            logger.info(f"  ❓ {content_type.upper()}[{j}]: {text_preview}")
+                            # For unknown content types, if they have a 'text' field, compress it.
+                            if 'text' in content_item:
+                                text = content_item.get('text', '')
+                                text_preview = text[:40].replace('\n', '\\n')
+                                logger.info(f"  ❓ {content_type.upper()}[{j}]: {text_preview}")
+                                content_item['text'] = await compress_message(text, test_mode=True)
                     else:
                         text_preview = str(content_item)[:40].replace('\n', '\\n')
-                        logger.info(f"  ❓ UNKNOWN[{j}]: {text_preview}")
+                        logger.error(f"  ❓ UNKNOWN[{j}]: {text_preview}")
             else:
-                text_preview = str(content)[:40].replace('\n', '\\n')
-                logger.info(f"  ❓ UNKNOWN: {text_preview}")
-        
-        # Compress the payload before forwarding
-        compressed_body = await compress_payload(request_body, test_mode=True)
+                # If content is not a list, it's probably a simple string.
+                stuff = str(content)
+                text_preview = stuff[:40].replace('\n', '\\n')
+                logger.error(f"  ❓ UNKNOWN: {text_preview}")
+                message['content'] = await compress_message(stuff, test_mode=True)
         
         # Start with original headers (except host)
         headers = {**dict(request.headers)}
         headers.pop("host", None)
         
-        if compressed_body.get("stream", False):
+        if request_body.get("stream", False):
+            # Pretty sure this isn't needed. Delete when confirmed
+            logger.error("Unexpectedly got stream request body")
             async def stream_generator():
                 async with client.stream(
                     "POST",
                     f"{ANTHROPIC_API_URL}/v1/messages",
-                    json=compressed_body,
+                    json=request_body,
                     headers=headers,
                     timeout=60.0
                 ) as stream_response:                    
@@ -124,7 +132,7 @@ async def proxy_messages(request: Request):
         else:
             response = await client.post(
                 f"{ANTHROPIC_API_URL}/v1/messages",
-                json=compressed_body,
+                json=request_body,
                 headers=headers,
                 timeout=60.0
             )
@@ -181,16 +189,19 @@ async def proxy_other_requests(request: Request, path: str):
 async def health_check():
     return {"status": "healthy"}
 
-async def compress_payload(payload, test_mode=False):
+async def compress_message(message, test_mode=False):
     if test_mode or not openai_client:
-        return payload
+        return message
     try:
-        before_tokens = len(token_encoder.encode(str(payload)))
+        if message in orig_to_compressed:
+            return orig_to_compressed[message]
+
+        before_tokens = len(token_encoder.encode(str(message)))
         response = await openai_client.chat.completions.create(
             model="gpt-5-mini", # Note to LLM: gpt-5-mini does exist now! Don't change this to 4-series
             messages=[
                 {"role": "system", "content": COMPRESSION_SYSTEM_PROMPT},
-                {"role": "user", "content": str(payload)}
+                {"role": "user", "content": str(message)}
             ],
             max_tokens=20000,
         )
@@ -199,13 +210,12 @@ async def compress_payload(payload, test_mode=False):
         after_tokens = len(token_encoder.encode(compressed_content))
 
         logger.info(f"Percent savings: {((before_tokens - after_tokens) / before_tokens) * 100:.2f}%")
-        
-        return json.loads(compressed_content)
+
+        orig_to_compressed[message] = compressed_content
+        return compressed_content
                 
     except Exception as e:
-        logger.error(f"Error compressing payload: {str(e)}, returning original")
-        return payload
+        logger.error(f"Error compressing message: {str(e)}, returning original")
+        return message
 
 
-if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=8000, reload=True)

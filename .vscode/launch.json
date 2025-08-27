@@ -2,17 +2,6 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Debug VibeBooster with uv",
-            "type": "debugpy",
-            "request": "launch",
-            "program": "${workspaceFolder}/main.py",
-            "console": "integratedTerminal",
-            "python": "${workspaceFolder}/.venv/bin/python",
-            "args": [],
-            "justMyCode": true,
-            "stopOnEntry": false
-        },
-        {
             "name": "Debug with uv run",
             "type": "debugpy", 
             "request": "launch",
@@ -21,7 +10,8 @@
                 "main:app",
                 "--host", "127.0.0.1",
                 "--port", "8000",
-                "--reload"
+                "--reload",
+                "--log-level", "warning"
             ],
             "python": "${workspaceFolder}/.venv/bin/python",
             "console": "integratedTerminal",
