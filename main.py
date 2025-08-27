@@ -1,6 +1,5 @@
 import logging
 import os
-import asyncio
 from contextlib import asynccontextmanager
 
 import httpx
@@ -13,7 +12,7 @@ import tiktoken
 
 from prompts import COMPRESSION_SYSTEM_PROMPT
 
-logging.basicConfig(level=logging.WARNING)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 ANTHROPIC_API_URL = "https://api.anthropic.com"
@@ -55,12 +54,10 @@ async def proxy_messages(request: Request):
         
         request_body = await request.json()
 
-        compression_tasks = []
-        items_to_modify = []
-
+        # TODO spin these off on threads. these are independent
         for i, message in enumerate(request_body.get('messages', [])):
             role = message.get('role', 'unknown')
-            logger.warning(f"─── Message {i}: role={role} ───")
+            logger.info(f"─── Message {i}: role={role} ───")
 
             content = message.get('content', [])
             if isinstance(content, list):
@@ -70,59 +67,40 @@ async def proxy_messages(request: Request):
                         
                         if content_type == 'text':
                             text = content_item.get('text', '')
-                            if text in orig_to_compressed:
-                                content_item['text'] = orig_to_compressed[text]
-                            else:
-                                text_preview = text[:40].replace('\n', '\\n')
-                                logger.warning(f"  📝 TEXT[{j}]: {text_preview}")
-                                compression_tasks.append(compress_message(text))
-                                items_to_modify.append((content_item, 'text'))
+                            text_preview = text[:40].replace('\n', '\\n')
+                            logger.info(f"  📝 TEXT[{j}]: {text_preview}")
+                            content_item['text'] = await compress_message(text, test_mode=True)
                         elif content_type == 'tool_use':
                             tool_name = content_item.get('name', 'unknown')
                             tool_id = content_item.get('id', 'unknown')
                             tool_input = content_item.get('input', {})
                             input_preview = str(tool_input)[:80].replace('\n', '\\n')
-                            logger.warning(f"  🔧 TOOL_USE[{j}]: {tool_name}")
-                            logger.warning(f"    └─ id: {tool_id}")
-                            logger.warning(f"    └─ input: {input_preview}")
+                            logger.info(f"  🔧 TOOL_USE[{j}]: {tool_name}")
+                            logger.info(f"    └─ id: {tool_id}")
+                            logger.info(f"    └─ input: {input_preview}")
                         elif content_type == 'tool_result':
                             tool_use_id = content_item.get('tool_use_id', 'unknown')
                             result_content = content_item.get('content', '')
-                            if result_content in orig_to_compressed:
-                                content_item['content'] = orig_to_compressed[result_content]
-                            else:
-                                content_preview = str(result_content)[:80].replace('\n', '\\n')
-                                logger.warning(f"  📋 TOOL_RESULT[{j}]: {tool_use_id}")
-                                logger.warning(f"    └─ content: {content_preview}")
-                                compression_tasks.append(compress_message(result_content))
-                                items_to_modify.append((content_item, 'content'))
+                            content_preview = str(result_content)[:80].replace('\n', '\\n')
+                            logger.info(f"  📋 TOOL_RESULT[{j}]: {tool_use_id}")
+                            logger.info(f"    └─ content: {content_preview}")
+                            content_item['content'] = await compress_message(result_content, test_mode=True)
                         else:
+                            # For unknown content types, if they have a 'text' field, compress it.
                             if 'text' in content_item:
                                 text = content_item.get('text', '')
-                                if text in orig_to_compressed:
-                                    content_item['text'] = orig_to_compressed[text]
-                                else:
-                                    text_preview = text[:40].replace('\n', '\\n')
-                                    logger.warning(f"  ❓ {content_type.upper()}[{j}]: {text_preview}")
-                                    compression_tasks.append(compress_message(text))
-                                    items_to_modify.append((content_item, 'text'))
+                                text_preview = text[:40].replace('\n', '\\n')
+                                logger.info(f"  ❓ {content_type.upper()}[{j}]: {text_preview}")
+                                content_item['text'] = await compress_message(text, test_mode=True)
                     else:
                         text_preview = str(content_item)[:40].replace('\n', '\\n')
-                        logger.warning(f"  ❓ UNKNOWN[{j}]: {text_preview}")
+                        logger.error(f"  ❓ UNKNOWN[{j}]: {text_preview}")
             else:
+                # If content is not a list, it's probably a simple string.
                 stuff = str(content)
-                if stuff in orig_to_compressed:
-                    message['content'] = orig_to_compressed[stuff]
-                else:
-                    text_preview = stuff[:40].replace('\n', '\\n')
-                    logger.warning(f"  ❓ UNKNOWN: {text_preview}")
-                    compression_tasks.append(compress_message(stuff))
-                    items_to_modify.append((message, 'content'))
-
-        if compression_tasks:
-            compressed_results = await asyncio.gather(*compression_tasks)
-            for i, (item, key) in enumerate(items_to_modify):
-                item[key] = compressed_results[i]
+                text_preview = stuff[:40].replace('\n', '\\n')
+                logger.error(f"  ❓ UNKNOWN: {text_preview}")
+                message['content'] = await compress_message(stuff, test_mode=True)
         
         # Start with original headers (except host and content-length)
         headers = {**dict(request.headers)}
@@ -211,15 +189,7 @@ async def proxy_other_requests(request: Request, path: str):
 
 @app.get("/health")
 async def health_check():
-    cache_filename = "orig_to_compressed_cache.json"
-    try:
-        with open(cache_filename, "w") as f:
-            json.dump(orig_to_compressed, f, indent=4)
-        logger.warning(f"Cache dumped to {cache_filename}")
-        return {"status": "healthy", "cache_dumped": True}
-    except Exception as e:
-        logger.error(f"Failed to dump cache: {e}")
-        return {"status": "healthy", "cache_dumped": False, "error": str(e)}
+    return {"status": "healthy"}
 
 async def compress_message(message, test_mode=False):
     if test_mode or not openai_client:
