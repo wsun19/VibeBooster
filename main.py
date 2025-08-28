@@ -69,7 +69,7 @@ async def proxy_messages(request: Request):
                             text = content_item.get('text', '')
                             text_preview = text[:40].replace('\n', '\\n')
                             logger.info(f"  📝 TEXT[{j}]: {text_preview}")
-                            content_item['text'] = await compress_message(text, test_mode=True)
+                            content_item['text'] = await compress_message(text)
                         elif content_type == 'tool_use':
                             tool_name = content_item.get('name', 'unknown')
                             tool_id = content_item.get('id', 'unknown')
@@ -84,14 +84,14 @@ async def proxy_messages(request: Request):
                             content_preview = str(result_content)[:80].replace('\n', '\\n')
                             logger.info(f"  📋 TOOL_RESULT[{j}]: {tool_use_id}")
                             logger.info(f"    └─ content: {content_preview}")
-                            content_item['content'] = await compress_message(result_content, test_mode=True)
+                            content_item['content'] = await compress_message(result_content)
                         else:
                             # For unknown content types, if they have a 'text' field, compress it.
                             if 'text' in content_item:
                                 text = content_item.get('text', '')
                                 text_preview = text[:40].replace('\n', '\\n')
                                 logger.info(f"  ❓ {content_type.upper()}[{j}]: {text_preview}")
-                                content_item['text'] = await compress_message(text, test_mode=True)
+                                content_item['text'] = await compress_message(text)
                     else:
                         text_preview = str(content_item)[:40].replace('\n', '\\n')
                         logger.error(f"  ❓ UNKNOWN[{j}]: {text_preview}")
@@ -100,7 +100,7 @@ async def proxy_messages(request: Request):
                 stuff = str(content)
                 text_preview = stuff[:40].replace('\n', '\\n')
                 logger.error(f"  ❓ UNKNOWN: {text_preview}")
-                message['content'] = await compress_message(stuff, test_mode=True)
+                message['content'] = await compress_message(stuff)
         
         # Start with original headers (except host and content-length)
         headers = {**dict(request.headers)}
@@ -108,8 +108,6 @@ async def proxy_messages(request: Request):
         headers.pop("content-length", None)
         
         if request_body.get("stream", False):
-            # Pretty sure this isn't needed. Delete when confirmed
-            logger.error("Unexpectedly got stream request body")
             async def stream_generator():
                 async with client.stream(
                     "POST",
@@ -192,11 +190,14 @@ async def health_check():
     return {"status": "healthy"}
 
 async def compress_message(message, test_mode=False):
+    test_mode = False
     if test_mode or not openai_client:
         return message
     try:
         if message in orig_to_compressed:
             return orig_to_compressed[message]
+        elif message in orig_to_compressed.values():
+            return message
 
         before_tokens = len(token_encoder.encode(str(message)))
         response = await openai_client.chat.completions.create(
@@ -207,12 +208,14 @@ async def compress_message(message, test_mode=False):
             ],
             max_completion_tokens=20000,
         )
-        
+        # '{"messages":[{"role":"user","content":"Just reply \\"cat\\""}]}'
         compressed_content = response.choices[0].message.content
         after_tokens = len(token_encoder.encode(compressed_content))
 
         logger.info(f"Percent savings: {((before_tokens - after_tokens) / before_tokens) * 100:.2f}%")
 
+        if before_tokens < after_tokens:
+orig_to_compressed[message] = message
         orig_to_compressed[message] = compressed_content
         return compressed_content
                 
