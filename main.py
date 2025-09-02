@@ -5,9 +5,7 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse, Response
-import uvicorn
 from openai import AsyncOpenAI
-import json
 import tiktoken
 
 from prompts import COMPRESSION_SYSTEM_PROMPT
@@ -16,12 +14,15 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 ANTHROPIC_API_URL = "https://api.anthropic.com"
+MINIMUM_TOKENS_TO_COMPRESS = 200
 client = httpx.AsyncClient()
 openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY")) if os.getenv("OPENAI_API_KEY") else None
 token_encoder = tiktoken.get_encoding("cl100k_base")
 
 # TODO make this a cache with some eviction policy
 orig_to_compressed = {}
+tokens_saved = 0
+total_tokens_processed = 0
 
 async def ensure_client_healthy():
     global client
@@ -95,12 +96,13 @@ async def proxy_messages(request: Request):
                     else:
                         text_preview = str(content_item)[:40].replace('\n', '\\n')
                         logger.error(f"  ❓ UNKNOWN[{j}]: {text_preview}")
+                        content[j] = await compress_message(str(content_item))
             else:
                 # If content is not a list, it's probably a simple string.
-                stuff = str(content)
-                text_preview = stuff[:40].replace('\n', '\\n')
+                stringified_content = str(content)
+                text_preview = stringified_content[:40].replace('\n', '\\n')
                 logger.error(f"  ❓ UNKNOWN: {text_preview}")
-                message['content'] = await compress_message(stuff)
+                message['content'] = await compress_message(stringified_content)
         
         # Start with original headers (except host and content-length)
         headers = {**dict(request.headers)}
@@ -185,14 +187,12 @@ async def proxy_other_requests(request: Request, path: str):
         headers=dict(response.headers)
     )
 
-@app.get("/health")
-async def health_check():
-    return {"status": "healthy"}
-
 async def compress_message(message, test_mode=False):
+    global tokens_saved, total_tokens_processed, orig_to_compressed
     test_mode = False
     if test_mode or not openai_client:
         return message
+        
     try:
         if message in orig_to_compressed:
             return orig_to_compressed[message]
@@ -200,6 +200,8 @@ async def compress_message(message, test_mode=False):
             return message
 
         before_tokens = len(token_encoder.encode(str(message)))
+        if before_tokens < MINIMUM_TOKENS_TO_COMPRESS:
+            return message
         response = await openai_client.chat.completions.create(
             model="gpt-5-mini", # Note to LLM: gpt-5-mini does exist now! Don't change this to 4-series
             messages=[
@@ -207,16 +209,23 @@ async def compress_message(message, test_mode=False):
                 {"role": "user", "content": str(message)}
             ],
             max_completion_tokens=20000,
+            reasoning_effort="minimal"
         )
-        # '{"messages":[{"role":"user","content":"Just reply \\"cat\\""}]}'
         compressed_content = response.choices[0].message.content
         after_tokens = len(token_encoder.encode(compressed_content))
 
-        logger.info(f"Percent savings: {((before_tokens - after_tokens) / before_tokens) * 100:.2f}%")
+        cur_tokens_saved = max(before_tokens - after_tokens, 0)
+        total_tokens_processed += before_tokens
+        tokens_saved += cur_tokens_saved
 
         if before_tokens < after_tokens:
-orig_to_compressed[message] = message
-        orig_to_compressed[message] = compressed_content
+            # Don't compress, since the LLM didn't reduce any tokens
+            orig_to_compressed[message] = message
+            return message
+        else:
+            orig_to_compressed[message] = compressed_content
+
+        logger.info(f"Percent savings on this message: {(cur_tokens_saved / max(before_tokens, 1)) * 100:.2f}% Total tokens saved: {tokens_saved} Percent savings on all processed tokens: {(tokens_saved / max(total_tokens_processed, 1)) * 100:.2f}%")
         return compressed_content
                 
     except Exception as e:

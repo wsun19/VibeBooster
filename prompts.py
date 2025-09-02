@@ -17,3 +17,5 @@ Follow these compression rules in order:
     * **Do NOT remove**: Any other content, especially error messages, stack traces, IDs, file paths, or logs.
 
 Now, compress the following payload:"""
+
+MINIMIZATION_SYSTEM_PROMPT = """Without compromising the quality of your output, try to be succinct in your response. This mostly applies to your text-based status updates explanations, and code comments. Be concise, but explain things in detail if explicitly asked. Remember, code correctness and readability is still your highest priority."""

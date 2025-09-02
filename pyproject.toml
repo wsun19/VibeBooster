@@ -1,7 +1,7 @@
 [project]
 name = "vibebooster"
 version = "0.1.0"
-description = "Add your description here"
+description = "Intercept Anthropic API requests and compress them to reduce token count."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
